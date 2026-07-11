@@ -1,0 +1,66 @@
+# =============================================================================
+# Win11 重型 OCR 服务 — Python 依赖
+# 对应阶段 3：PaddleOCR + Flask 健康检查 + PDF 渲染
+# =============================================================================
+# 环境说明：
+#   - Python 3.11（本项目使用 .venv/ Python 3.11.9）
+#   - GTX 960 Maxwell CC 5.2 不支持 PaddlePaddle GPU 加速
+#   - 已切换为 paddlepaddle CPU 版本，无需 CUDA Toolkit
+#   - NVIDIA 驱动保留用于显示输出即可
+#
+# 部署方式：NSSM（Windows 服务）+ paddlepaddle-cpu
+#   Session 0 完全安全 — CPU 版本不加载任何 CUDA DLL
+# =============================================================================
+
+# ---- Web 框架与健康检查（与 Ubuntu 端一致）----
+flask
+flask-cors
+psutil
+
+# ---- PaddleOCR 引擎（CPU 版本）----
+# GTX 960 Maxwell CC 5.2 不支持 GPU 加速，使用 CPU 版本
+# paddlepaddle==2.6.2 对应 Python 3.11
+paddlepaddle==2.6.2
+paddleocr==2.7.0.3
+
+# ---- PDF 渲染 ----
+# 注意：paddleocr 2.7.0.3 要求 PyMuPDF<1.21.0，但 1.20.x 需要从源码编译（依赖 VS devenv.com）
+# 实际使用 1.28.0 预编译 wheel，OCR 服务器只用 PyMuPDF 渲染 PDF，不经过 paddleocr 内部 API
+# 安装方式：先 pip install paddleocr --no-deps，再单独装依赖，最后 pip install PyMuPDF
+PyMuPDF>=1.25.0
+
+# ---- 图片处理 ----
+Pillow
+opencv-python<=4.6.0.66       # paddleocr 2.7.0.3 版本约束
+# ⚠ 严禁安装 opencv-python-headless！其 5.x 命名空间包会覆盖 cv2 模块，
+#   导致 INTER_NEAREST 等常量缺失，PaddleOCR 初始化失败。
+#   如意外安装：pip uninstall opencv-python-headless -y
+#              rm -rf .venv/Lib/site-packages/cv2
+#              pip install opencv-python==4.6.0.66 opencv-contrib-python==4.6.0.66
+opencv-contrib-python<=4.6.0.66
+
+# ---- 数值计算 ----
+# ⚠ 必须用 numpy<2.0.0！PaddlePaddle 2.6.2 编译时链接 numpy 1.x ABI，
+#    numpy 2.x 会导致 GPU 计算结果错误（静默返回全零数组）
+numpy<2.0.0
+
+# ---- PaddleOCR 附加依赖（pip install paddleocr 会自动带入）----
+shapely
+scikit-image
+imgaug
+pyclipper
+lmdb
+tqdm
+visualdl
+rapidfuzz
+cython
+lxml
+premailer
+openpyxl
+attrdict
+pyyaml
+python-docx
+beautifulsoup4
+fonttools
+fire
+pdf2docx

@@ -1,0 +1,5 @@
+.venv/
+.claude/
+__pycache__/
+nssm_stdout.log
+nssm_stderr.log

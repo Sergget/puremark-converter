@@ -1,0 +1,16 @@
+# ---- 通用基础依赖（阶段 1/2 双端共用）----
+flask
+flask-cors
+psutil
+
+# ---- Ubuntu 轻量转换（阶段 2）----
+markitdown
+
+# ---- Win11 重型 OCR（阶段 3）----
+# 完整清单见 requirements_win11.txt，以下为关键包：
+# paddlepaddle-gpu==2.6.2    # CUDA 11.8
+# paddleocr==2.7.0.3
+# PyMuPDF                     # PDF 渲染
+# opencv-python-headless
+# Pillow
+# numpy
