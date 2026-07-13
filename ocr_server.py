@@ -29,6 +29,20 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import psutil
 
+
+def _force_utf8_stdio():
+    """Ensure stdout/stderr use UTF-8 so Chinese logs are written correctly on Windows."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name)
+        try:
+            if getattr(stream, "encoding", None):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_force_utf8_stdio()
+
 # =============================================================================
 # 配置 —— 全部来自环境变量，和 Ubuntu 端保持一致
 # =============================================================================
@@ -302,6 +316,7 @@ def supported_formats():
             "image_ocr": True,       # 图片直接 OCR
             "pdf_render_ocr": True,  # PDF 渲染 → OCR（扫描件）
             "office_formats": False, # docx/xlsx 等由 Ubuntu markitdown 处理
+            "structured_lines": True,  # /convert 可返回逐行 bbox+置信度（见 include_lines 参数）
         },
     }), 200
 
@@ -312,6 +327,12 @@ def supported_formats():
 
 @app.route("/convert", methods=["POST"])
 def convert_document():
+    # ---- 0. 可选查询参数 ----
+    # include_lines=false/0/no 可关闭行级结构化数据（省响应体积/带宽），默认开启。
+    include_lines = request.args.get("include_lines", "true").strip().lower() not in (
+        "false", "0", "no"
+    )
+
     # ---- 1. 参数校验 ----
     if "file" not in request.files:
         return jsonify({"success": False, "error": "No file part in the request"}), 400
@@ -379,14 +400,21 @@ def convert_document():
     elapsed_ms = round((time.time() - t_start) * 1000)
 
     # ---- 6. 返回结果 ----
-    return jsonify({
+    # success/content/engine/pages/elapsed_ms 语义与字段名保持不变（下游健康检查/
+    # 降级逻辑依赖这些字段）。lines 是新增的可选字段，仅在 include_lines=true
+    # （默认）时附带，不影响老调用方。
+    response_body = {
         "success": True,
         "filename": file.filename,
         "content": result["text"],
         "engine": "paddleocr_cpu",
         "pages": result["pages"],
         "elapsed_ms": elapsed_ms,
-    }), 200
+    }
+    if include_lines:
+        response_body["lines"] = result["lines"]
+
+    return jsonify(response_body), 200
 
 
 # =============================================================================
@@ -415,8 +443,11 @@ def _do_ocr(file_bytes, ext, file_type, original_filename):
         img_array = np.array(img)
 
         raw_result = ocr.ocr(img_array, cls=False)
-        text = _extract_text(raw_result)
+        # 单页图片不需要 page 字段（下游只有多页 PDF 场景才需要区分页码）
+        page_lines = _extract_lines(raw_result)
+        text = _lines_to_text(page_lines)
         pages = 1
+        all_lines = page_lines
 
     elif file_type == "pdf":
         # PDF：PyMuPDF 逐页渲染
@@ -432,6 +463,7 @@ def _do_ocr(file_bytes, ext, file_type, original_filename):
             )
 
         all_texts = []
+        all_lines = []
         for page_num in range(page_count):
             page = doc[page_num]
             # 渲染为 PNG 图片（内存中）
@@ -447,21 +479,24 @@ def _do_ocr(file_bytes, ext, file_type, original_filename):
             img_array = np.array(img)
 
             raw_result = ocr.ocr(img_array, cls=False)
-            page_text = _extract_text(raw_result)
+            # 多页场景：每行标上 1-indexed 页码，方便下游按页重建版面
+            page_lines = _extract_lines(raw_result, page_num=page_num + 1)
+            page_text = _lines_to_text(page_lines)
 
             if page_text.strip():
                 all_texts.append(f"--- 第 {page_num + 1} 页 ---\n{page_text}")
+            all_lines.extend(page_lines)
 
         doc.close()
         text = "\n\n".join(all_texts)
         pages = page_count
 
-    return {"text": text, "pages": pages}
+    return {"text": text, "pages": pages, "lines": all_lines}
 
 
-def _extract_text(ocr_result):
+def _extract_lines(ocr_result, page_num=None):
     """
-    从 PaddleOCR 的原始输出中提取纯文本。
+    从 PaddleOCR 的原始输出中提取结构化行信息（文字 + bbox 坐标 + 置信度）。
 
     PaddleOCR 2.7 返回格式：
     [
@@ -471,18 +506,23 @@ def _extract_text(ocr_result):
         ]
     ]
     如果没有检测到文字，可能返回 [None] 或 [[]]。
+
+    返回 list[dict]，每个 dict 形如：
+        {"text": "识别出的文字", "bbox": [[x1,y1],...,[x4,y4]], "confidence": 0.98}
+    若传入 page_num，则每个 dict 额外带上 "page": page_num（1-indexed），
+    用于多页 PDF 场景下游按页区分行。bbox 坐标是渲染图片的像素坐标，不做归一化。
     """
     if ocr_result is None:
-        return ""
+        return []
 
     # ocr_result 是一个 list，每个元素对应一张输入图
     if len(ocr_result) == 0:
-        return ""
+        return []
 
     page_result = ocr_result[0]
 
     if page_result is None:
-        return ""
+        return []
 
     lines = []
     for item in page_result:
@@ -490,13 +530,30 @@ def _extract_text(ocr_result):
             continue
         try:
             # item = [bbox_list, (text, confidence)]
-            text = item[1][0]
-            if text and text.strip():
-                lines.append(text)
-        except (IndexError, TypeError):
+            bbox_raw, (text, confidence) = item
+            if not text or not text.strip():
+                continue
+
+            # numpy 类型不能直接 json.dumps，统一转成原生 float
+            bbox = [[round(float(x), 1), round(float(y), 1)] for x, y in bbox_raw]
+
+            line = {
+                "text": text,
+                "bbox": bbox,
+                "confidence": round(float(confidence), 4),
+            }
+            if page_num is not None:
+                line["page"] = page_num
+            lines.append(line)
+        except (IndexError, TypeError, ValueError):
             continue
 
-    return "\n".join(lines)
+    return lines
+
+
+def _lines_to_text(lines):
+    """把结构化行按识别顺序拼接成一段文本（content 字段沿用的老行为）。"""
+    return "\n".join(line["text"] for line in lines)
 
 
 # =============================================================================
