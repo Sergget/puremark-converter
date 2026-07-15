@@ -1,33 +1,11 @@
-"""
-Win11 重型 OCR 服务 —— 阶段 3
-合并健康检查 + PaddleOCR CPU 文档转换，一个 Flask 进程跑全部。
-
-启动方式（命令行测试）：
-    set NODE_NAME=win11&& set NODE_ROLE=heavy&& set PORT=5000&& python ocr_server.py
-
-启动方式（开机自启 — NSSM Windows 服务，推荐）：
-    见 PROGRESS.md → NSSM 部署步骤
-
-依赖安装（一次性）：
-    pip install -r requirements_win11.txt
-
-前置条件：
-    - paddlepaddle==2.6.2 (CPU 版本)，无需 CUDA Toolkit
-    - GTX 960 (Maxwell CC 5.2) 永久使用 CPU 模式
-    - Session 0 (Windows 服务) 完全安全 — CPU 版本不加载 CUDA DLL
-"""
-
 import io
 import os
 import sys
 import time
 import threading
 import traceback
+import logging  # Import logging module
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import psutil
 
 
 def _force_utf8_stdio():
@@ -41,7 +19,26 @@ def _force_utf8_stdio():
             pass
 
 
+def ensure_project_venv():
+    """Fail fast if ocr_server.py is run outside the project virtual environment."""
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    expected_python = os.path.join(project_root, ".venv", "Scripts", "python.exe")
+    if os.path.exists(expected_python):
+        current_python = os.path.abspath(sys.executable)
+        if os.path.normcase(current_python) != os.path.normcase(os.path.abspath(expected_python)):
+            logging.error("[ocr_server] 错误：当前 Python 解释器不是项目虚拟环境中的 .venv。")
+            logging.error(f"[ocr_server] 当前解释器: {current_python}")
+            logging.error(f"[ocr_server] 请改用: {expected_python} {os.path.join(project_root, 'ocr_server.py')}")
+            logging.error("[ocr_server] 例如：.\\venv\\Scripts\\python.exe .\\ocr_server.py")
+            sys.exit(1)
+
+
 _force_utf8_stdio()
+ensure_project_venv()
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import psutil
 
 # =============================================================================
 # 配置 —— 全部来自环境变量，和 Ubuntu 端保持一致
@@ -91,6 +88,10 @@ OCR_MODE = "cpu"       # 永久 CPU 模式
 # =============================================================================
 
 app = Flask(__name__)
+
+# Configure logging for the Flask app
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+app.logger.setLevel(logging.INFO)
 
 # CORS：和现有健康检查保持一致，生产环境建议收紧为看板域名
 CORS(app, resources={
@@ -156,11 +157,11 @@ def get_ocr():
         try:
             from paddleocr import PaddleOCR
 
-            print("[ocr_server] 正在初始化 PaddleOCR（首次加载模型，CPU 模式）...")
-            print("[ocr_server]   模型: PP-OCRv4 mobile 系列")
-            print("[ocr_server]   语言: ch（中文）")
-            print("[ocr_server]   方向分类: 关闭（use_angle_cls=False，节省内存）")
-            print("[ocr_server]   设备: CPU（GTX 960 Maxwell CC 5.2 不支持 GPU 加速）")
+            app.logger.info("[ocr_server] 正在初始化 PaddleOCR（首次加载模型，CPU 模式）...")
+            app.logger.info("[ocr_server]   模型: PP-OCRv4 mobile 系列")
+            app.logger.info("[ocr_server]   语言: ch（中文）")
+            app.logger.info("[ocr_server]   方向分类: 关闭（use_angle_cls=False，节省内存）")
+            app.logger.info("[ocr_server]   设备: CPU（GTX 960 Maxwell CC 5.2 不支持 GPU 加速）")
 
             _ocr_instance = PaddleOCR(
                 lang="ch",
@@ -168,15 +169,17 @@ def get_ocr():
                 use_gpu=False,              # GTX 960 永久 CPU 模式
             )
 
-            print("[ocr_server] PaddleOCR 初始化完成（CPU 模式）")
+            app.logger.info("[ocr_server] PaddleOCR 初始化完成（CPU 模式）")
             return _ocr_instance
 
         except Exception as e:
             _ocr_init_error = str(e)
-            print(f"[ocr_server] PaddleOCR 初始化失败: {e}")
-            traceback.print_exc()
+            app.logger.error(f"[ocr_server] PaddleOCR 初始化失败: {e}")
+            app.logger.error(traceback.format_exc())
             return None
 
+# Global ThreadPoolExecutor for OCR tasks
+ocr_executor = ThreadPoolExecutor(max_workers=1)
 
 # =============================================================================
 # 辅助：获取 GPU 基本信息（仅用于 /health/gpu 展示，不用于兼容性判断）
@@ -206,8 +209,8 @@ def _get_gpu_display_info():
             if len(parts) >= 2:
                 info["gpu_name"] = parts[0]
                 info["gpu_memory_mb"] = int(float(parts[1]))
-    except Exception:
-        pass
+    except Exception as e:
+        app.logger.warning(f"Failed to get GPU name/memory from nvidia-smi: {e}")
 
     # 驱动版本
     try:
@@ -219,8 +222,8 @@ def _get_gpu_display_info():
         )
         if result.returncode == 0 and result.stdout.strip():
             info["driver_version"] = result.stdout.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        app.logger.warning(f"Failed to get GPU driver version from nvidia-smi: {e}")
 
     return info
 
@@ -284,7 +287,8 @@ def health_gpu():
                 info["vram_used_mb"] = int(float(parts[0]))
                 info["vram_free_mb"] = int(float(parts[1]))
                 info["gpu_util_pct"] = int(float(parts[2]))
-    except Exception:
+    except Exception as e:
+        app.logger.warning(f"Failed to get GPU memory/utilization from nvidia-smi: {e}")
         info["vram_used_mb"] = None
         info["vram_free_mb"] = None
         info["gpu_util_pct"] = None
@@ -335,10 +339,12 @@ def convert_document():
 
     # ---- 1. 参数校验 ----
     if "file" not in request.files:
+        app.logger.warning("No file part in the request")
         return jsonify({"success": False, "error": "No file part in the request"}), 400
 
     file = request.files["file"]
     if file.filename is None or file.filename == "":
+        app.logger.warning("No file selected")
         return jsonify({"success": False, "error": "No file selected"}), 400
 
     # ---- 2. 读取文件到内存（不落盘）----
@@ -346,6 +352,9 @@ def convert_document():
     file_size_mb = len(file_bytes) / (1024 * 1024)
 
     if file_size_mb > MAX_FILE_SIZE_MB:
+        app.logger.warning(
+            f"File too large ({file_size_mb:.1f}MB). Max allowed: {MAX_FILE_SIZE_MB}MB"
+        )
         return jsonify({
             "success": False,
             "error": f"File too large ({file_size_mb:.1f}MB). Max allowed: {MAX_FILE_SIZE_MB}MB"
@@ -360,6 +369,9 @@ def convert_document():
     elif ext in PDF_EXTENSIONS:
         file_type = "pdf"
     else:
+        app.logger.warning(
+            f"Unsupported format '{ext}'. Supported: {sorted(IMAGE_EXTENSIONS | PDF_EXTENSIONS)}"
+        )
         return jsonify({
             "success": False,
             "error": f"Unsupported format '{ext}'. Supported: {sorted(IMAGE_EXTENSIONS | PDF_EXTENSIONS)}"
@@ -368,6 +380,7 @@ def convert_document():
     # ---- 4. 获取 OCR 引擎 ----
     ocr = get_ocr()
     if ocr is None:
+        app.logger.error(f"OCR engine not available. Init error: {_ocr_init_error or 'unknown'}")
         return jsonify({
             "success": False,
             "error": f"OCR engine not available. "
@@ -379,17 +392,22 @@ def convert_document():
     t_start = time.time()
 
     try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_do_ocr, file_bytes, ext, file_type, file.filename)
-            try:
-                result = future.result(timeout=OCR_TIMEOUT_SEC)
-            except FutureTimeoutError:
-                return jsonify({
-                    "success": False,
-                    "error": f"OCR timed out after {OCR_TIMEOUT_SEC}s. "
-                             f"The file may be too large or complex."
-                }), 504
+        future = ocr_executor.submit(_do_ocr, file_bytes, ext, file_type, file.filename)
+        try:
+            result = future.result(timeout=OCR_TIMEOUT_SEC)
+        except FutureTimeoutError:
+            app.logger.error(
+                f"OCR timed out after {OCR_TIMEOUT_SEC}s for file {file.filename}. "
+                f"The file may be too large or complex."
+            )
+            return jsonify({
+                "success": False,
+                "error": f"OCR timed out after {OCR_TIMEOUT_SEC}s. "
+                         f"The file may be too large or complex."
+            }), 504
     except Exception as e:
+        app.logger.error(f"OCR processing failed for file {file.filename}: {str(e)}")
+        app.logger.error(traceback.format_exc())
         return jsonify({
             "success": False,
             "error": f"OCR processing failed: {str(e)}"
@@ -398,6 +416,10 @@ def convert_document():
         task_finished()
 
     elapsed_ms = round((time.time() - t_start) * 1000)
+    app.logger.info(
+        f"Successfully processed file {file.filename} ({file_size_mb:.1f}MB, "
+        f"pages: {result['pages']}) in {elapsed_ms}ms"
+    )
 
     # ---- 6. 返回结果 ----
     # success/content/engine/pages/elapsed_ms 语义与字段名保持不变（下游健康检查/
@@ -437,6 +459,7 @@ def _do_ocr(file_bytes, ext, file_type, original_filename):
         from PIL import Image
         import numpy as np
 
+        app.logger.info(f"Processing image: {original_filename}")
         img = Image.open(io.BytesIO(file_bytes))
         if img.mode != "RGB":
             img = img.convert("RGB")
@@ -453,11 +476,16 @@ def _do_ocr(file_bytes, ext, file_type, original_filename):
         # PDF：PyMuPDF 逐页渲染
         import fitz  # PyMuPDF
 
+        app.logger.info(f"Processing PDF: {original_filename}")
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         page_count = doc.page_count
 
         if page_count > MAX_PDF_PAGES:
             doc.close()
+            app.logger.warning(
+                f"PDF {original_filename} has {page_count} pages, "
+                f"exceeds max {MAX_PDF_PAGES}"
+            )
             raise ValueError(
                 f"PDF has {page_count} pages, exceeds max {MAX_PDF_PAGES}"
             )
@@ -465,6 +493,7 @@ def _do_ocr(file_bytes, ext, file_type, original_filename):
         all_texts = []
         all_lines = []
         for page_num in range(page_count):
+            app.logger.debug(f"Rendering page {page_num + 1}/{page_count} of {original_filename}")
             page = doc[page_num]
             # 渲染为 PNG 图片（内存中）
             pix = page.get_pixmap(dpi=PDF_RENDER_DPI)
@@ -490,6 +519,7 @@ def _do_ocr(file_bytes, ext, file_type, original_filename):
         doc.close()
         text = "\n\n".join(all_texts)
         pages = page_count
+        app.logger.info(f"Finished processing PDF: {original_filename} with {pages} pages")
 
     return {"text": text, "pages": pages, "lines": all_lines}
 
@@ -545,7 +575,8 @@ def _extract_lines(ocr_result, page_num=None):
             if page_num is not None:
                 line["page"] = page_num
             lines.append(line)
-        except (IndexError, TypeError, ValueError):
+        except (IndexError, TypeError, ValueError) as e:
+            app.logger.debug(f"Error parsing OCR line item: {item}. Error: {e}")
             continue
 
     return lines
@@ -582,28 +613,28 @@ def index():
 # =============================================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print(f"  Win11 重型 OCR 服务")
-    print(f"  节点: {NODE_NAME}  角色: {NODE_ROLE}  端口: {PORT}")
-    print(f"  引擎: PaddlePaddle 2.6.2 CPU（paddlepaddle-cpu）")
-    print(f"  OCR 模式: CPU（永久 — GTX 960 Maxwell CC 5.2）")
-    print("=" * 60)
+    app.logger.info("=" * 60)
+    app.logger.info(f"  Win11 重型 OCR 服务")
+    app.logger.info(f"  节点: {NODE_NAME}  角色: {NODE_ROLE}  端口: {PORT}")
+    app.logger.info(f"  引擎: PaddlePaddle 2.6.2 CPU（paddlepaddle-cpu）")
+    app.logger.info(f"  OCR 模式: CPU（永久 — GTX 960 Maxwell CC 5.2）")
+    app.logger.info("=" * 60)
 
     # 显示 GPU 基本信息（仅展示用）
     gpu_info = _get_gpu_display_info()
     if gpu_info.get("gpu_name"):
-        print(f"[ocr_server] GPU: {gpu_info['gpu_name']} | "
+        app.logger.info(f"  GPU: {gpu_info['gpu_name']} | "
               f"显存: {gpu_info.get('gpu_memory_mb', '?')} MB | "
               f"驱动: {gpu_info.get('driver_version', '?')}")
-        print("[ocr_server] GPU 加速: 不可用（Maxwell CC 5.2 < 需要 CC 6.1+ Pascal）")
+        app.logger.info("  GPU 加速: 不可用（Maxwell CC 5.2 < 需要 CC 6.1+ Pascal）")
     else:
-        print("[ocr_server] GPU: 未检测到 nvidia-smi（不影响服务）")
-    print("[ocr_server] CUDA Toolkit: 无需安装（paddlepaddle-cpu 不依赖 CUDA）")
+        app.logger.info("  GPU: 未检测到 nvidia-smi（不影响服务）")
+    app.logger.info("  CUDA Toolkit: 无需安装（paddlepaddle-cpu 不依赖 CUDA）")
 
-    print(f"[ocr_server] /convert 端点将在首次请求时延迟加载 OCR 模型")
-    print(f"[ocr_server] /supported_formats 端点已就绪（供调度器动态发现）")
-    print(f"[ocr_server] 服务启动，监听 0.0.0.0:{PORT} ...")
-    print("=" * 60)
+    app.logger.info(f"  /convert 端点将在首次请求时延迟加载 OCR 模型")
+    app.logger.info(f"  /supported_formats 端点已就绪（供调度器动态发现）")
+    app.logger.info(f"服务启动，监听 0.0.0.0:{PORT} ...")
+    app.logger.info("=" * 60)
 
     # debug=False：常驻服务不要开 debug（reloader 在 Windows 上行为不一致）
     # threaded=False：确保单线程串行处理，避免多个 OCR 任务同时吃内存
