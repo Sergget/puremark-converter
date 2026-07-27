@@ -24,7 +24,8 @@ SERVICE_NAME="markitdown"                  # systemd 服务名，与 markitdown.
 SERVICE_SRC="$ROOT_DIR/main_server/markitdown.service"
 NGINX_CONF_SRC="$ROOT_DIR/main_server/markitdown.conf"
 SYSTEMD_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
-NGINX_DEST="/etc/nginx/conf.d/${SERVICE_NAME}.conf"
+NGINX_AVAILABLE="/etc/nginx/sites-available/${SERVICE_NAME}"
+NGINX_ENABLED="/etc/nginx/sites-enabled/${SERVICE_NAME}"
 
 # ---- 1. 创建目录并拷贝代码 ----
 # 注意：install -d 同时设置了 www-data 属主，确保 app.py 运行时对 /var/www/markitdown
@@ -56,7 +57,11 @@ fi
 # （app.py 监听的内部端口，默认 5000，可通过 PORT 环境变量覆盖）
 # SSL 证书位于 /etc/nginx/snippets/ssl-sergget.conf（需独立维护）
 if [ -f "$NGINX_CONF_SRC" ]; then
-    sudo install -m 0644 "$NGINX_CONF_SRC" "$NGINX_DEST"
+    # 拷贝到 sites-available
+    sudo install -m 0644 "$NGINX_CONF_SRC" "$NGINX_AVAILABLE"
+    # 创建软连接到 sites-enabled
+    sudo ln -sf "$NGINX_AVAILABLE" "$NGINX_ENABLED"
+
     if command -v nginx >/dev/null 2>&1; then
         # 验证配置语法，不阻止后续流程
         sudo nginx -t >/dev/null 2>&1 || true
@@ -78,7 +83,8 @@ sudo systemctl enable --now "$SERVICE_NAME" 2>/dev/null || true
 printf '===== PureMark Ubuntu 部署完成 =====\n'
 printf '调度入口（app.py）：%s\n' "$TARGET_DIR/app.py"
 printf '前端 UI 页面：       %s\n' "$HTML_DIR"
-printf 'Nginx 配置文件：     %s\n' "$NGINX_DEST"
+printf 'Nginx 配置文件：     %s\n' "$NGINX_AVAILABLE"
+printf 'Nginx 启用链接：     %s\n' "$NGINX_ENABLED"
 printf 'systemd 服务：       %s （已启用并启动）\n' "$SYSTEMD_DEST"
 printf '\n验证命令：\n'
 printf '  systemctl status %s\n' "$SERVICE_NAME"
