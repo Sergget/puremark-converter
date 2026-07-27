@@ -1,0 +1,9 @@
+flask
+flask-cors
+psutil
+requests
+pdfplumber
+pillow
+pymupdf
+"markitdown[all]"
+python-docx

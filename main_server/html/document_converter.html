@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PureMark 文档转换</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css">
+<script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+
+<style>
+  :root {
+    /* 字体族定义 */
+    --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", Fira Code, Consolas, monospace;
+
+    /* 默认浅色主题变量 */
+    --bg: #f4f7f5;
+    --panel: #ffffff;
+    --panel-2: #eef2ef;
+    --line: #d2dad5;
+    --text: #1a221e;
+    --dim: #606e66;
+    --accent: #2b6b53;
+    --accent-dim: #eafff5;
+    --warn: #c25332;
+    --shadow: 0 4px 12px rgba(0,0,0,0.03);
+  }
+
+  /* 深色主题变量 */
+  [data-theme="dark"] {
+    --bg: #0f1210;
+    --panel: #161b18;
+    --panel-2: #1d2420;
+    --line: #2a332d;
+    --text: #e4e9e4;
+    --dim: #8a9690;
+    --accent: #4fd1a5;
+    --accent-dim: #2b6b53;
+    --warn: #d97757;
+    --shadow: none;
+  }
+
+  * { box-sizing: border-box; transition: background-color .2s, border-color .2s, color .2s; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
+  
+  .wrap { max-width: 920px; margin: 0 auto; padding: 50px 24px 100px; }
+  
+  header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); padding-bottom: 20px; margin-bottom: 36px; }
+  
+  .logo-area { display: flex; align-items: center; gap: 12px; }
+  /* 用户自定义主 Logo */
+  .logo-icon { font-size: 28px; width: 28px; height: 28px; display: inline-block; }
+  header h1 { font-size: 24px; font-weight: 700; margin: 0; letter-spacing: -0.01em; display: flex; align-items: center; }
+  header h1 span { color: var(--accent); margin: 0 4px; }
+  
+  .header-controls { display: flex; align-items: center; gap: 16px; }
+  #themeToggle { background: transparent; border: 1px solid var(--line); border-radius: 6px; color: var(--text); padding: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+  #themeToggle:hover { border-color: var(--accent); color: var(--accent); }
+
+  #status { font-family: var(--font-mono); font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 8px; background: var(--panel); padding: 6px 14px; border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); }
+  #status iconify-icon { font-size: 15px; }
+  .status-up { color: var(--accent); }
+  .status-down { color: var(--warn); }
+
+  .drop { background: var(--panel); border: 2px dashed var(--line); border-radius: 8px; padding: 60px 24px; text-align: center; color: var(--dim); cursor: pointer; box-shadow: var(--shadow); }
+  .drop:hover { border-color: var(--accent); color: var(--text); }
+  .drop input { display: none; }
+  .drop .main-hint { font-size: 18px; font-weight: 500; color: var(--text); margin-bottom: 8px; }
+  .drop .hint { font-size: 14px; color: var(--dim); }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 28px; margin-top: 28px; display: none; box-shadow: var(--shadow); }
+  .panel.show { display: block; }
+  .panel h2 { font-family: var(--font-mono); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 20px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .filename { color: var(--accent); word-break: break-all; font-weight: bold; }
+
+  .stage-preview { max-width: 100%; max-height: 60vh; display: block; margin: 0 auto; border-radius: 4px; border: 1px solid var(--line); }
+  .no-crop-msg { color: var(--dim); text-align: center; padding: 30px 0; font-size: 15px; }
+
+  .row { display: flex; gap: 12px; margin-top: 24px; flex-wrap: wrap; }
+  button { font-family: var(--font-sans); font-size: 15px; font-weight: 500; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 10px 20px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button iconify-icon { font-size: 17px; }
+  
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  [data-theme="dark"] button.primary { color: #08120e; }
+  button.primary:hover { opacity: 0.9; border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.ghost { background: transparent; }
+
+  .crop-meta { font-family: var(--font-mono); font-size: 12px; color: var(--dim); margin-top: 14px; background: var(--panel-2); padding: 6px 12px; border-radius: 4px; display: inline-block; }
+
+  .fmt-row { display: flex; align-items: center; gap: 20px; margin-top: 24px; flex-wrap: wrap; font-size: 14px; color: var(--dim); border-top: 1px solid var(--line); padding-top: 20px; }
+  .fmt-row .fmt-label { color: var(--text); font-weight: 600; }
+  .fmt-row label { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text); }
+  .fmt-row input[type="radio"] { accent-color: var(--accent); cursor: pointer; width: 16px; height: 16px; margin: 0; }
+  .fmt-row label.disabled { opacity: .4; cursor: not-allowed; }
+  .fmt-row input[type="radio"]:disabled { cursor: not-allowed; }
+  .fmt-hint { font-size: 13px; color: var(--warn); margin-top: 8px; line-height: 1.4; }
+
+  .docx-notice { font-size: 15px; color: var(--dim); text-align: center; padding: 30px 0; line-height: 1.5; }
+
+  .pdf-nav { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 14px; color: var(--dim); background: var(--panel-2); padding: 8px 14px; border-radius: 6px; width: fit-content; }
+  .pdf-nav button { padding: 6px 12px; font-size: 13px; }
+  .pdf-nav .pageInput { width: 54px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-family: var(--font-mono); font-size: 13px; text-align: center; padding: 5px 2px; }
+  .pdf-nav .pageSep { color: var(--line); margin: 0 2px; }
+
+  pre#result { font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 20px; max-height: 60vh; overflow: auto; font-size: 14px; line-height: 1.62; margin: 0; color: var(--text); }
+  .result-meta { font-family: var(--font-mono); font-size: 12px; color: var(--dim); margin-bottom: 14px; display: flex; gap: 16px; flex-wrap: wrap; }
+  .result-meta b { color: var(--text); font-weight: 600; }
+  .error { color: var(--warn); }
+  pre#result.error { border-color: var(--warn); background: rgba(194, 83, 50, 0.05); }
+
+  .spinner { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid transparent; border-top-color: currentColor; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  footer { margin-top: 50px; font-family: var(--font-mono); font-size: 12px; color: var(--dim); border-top: 1px solid var(--line); padding-top: 16px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo-area">
+      <iconify-icon icon="streamline-plump-color:convert-pdf-1" class="logo-icon"></iconify-icon>
+      <h1>PureMark<span>::</span>文档转换</h1>
+    </div>
+    <div class="header-controls">
+      <button id="themeToggle" title="切换主题">
+        <iconify-icon icon="lucide:sun" id="themeIcon"></iconify-icon>
+      </button>
+      <div id="status">
+        <iconify-icon icon="lucide:circle-alert" id="statusIcon"></iconify-icon>
+        <span id="statusText">检测中</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="drop" id="drop">
+    <div class="main-hint">拖拽文件到此处，或点击选择</div>
+    <div class="hint">图片 / PDF 支持裁剪后提取；docx / xlsx 等格式直接转换</div>
+    <input type="file" id="fileInput"
+      accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp,.pdf,.docx,.xlsx,.pptx,.csv,.txt,.md,.html,.htm,.epub,.odp,.ods,.odt,.rtf,.xml,.json,.zip">
+  </div>
+
+  <div class="panel" id="cropPanel">
+    <h2>2 — 裁剪范围 <span class="filename" id="fnameCrop"></span></h2>
+    <div id="cropStage"></div>
+    <div class="no-crop-msg" id="noCropMsg" style="display:none;">
+      该格式不支持区域裁剪，将直接转换整份文件。
+    </div>
+    <div class="crop-meta" id="cropMeta"></div>
+    <div class="fmt-row" id="fmtRow">
+      <span class="fmt-label">输出格式：</span>
+      <label><input type="radio" name="outputFormat" value="md" checked> Markdown (.md)</label>
+      <label><input type="radio" name="outputFormat" value="txt"> 纯文本 (.txt)</label>
+      <label><input type="radio" name="outputFormat" value="docx"> Word (.docx)</label>
+    </div>
+    <div class="row">
+      <button class="ghost" id="resetCropBtn">
+        <iconify-icon icon="lucide:refresh-cw"></iconify-icon>重置裁剪框
+      </button>
+      <button class="ghost" id="skipCropBtn">
+        <iconify-icon icon="lucide:file-text"></iconify-icon>跳过裁剪，转换全文
+      </button>
+      <button class="primary" id="submitBtn">
+        <iconify-icon icon="lucide:zap" id="submitIcon"></iconify-icon><span id="submitText">提交转换</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="panel" id="resultPanel">
+    <h2>3 — 结果</h2>
+    <div class="result-meta" id="resultMeta"></div>
+    <pre id="result"></pre>
+    <div class="row">
+      <button id="copyBtn">
+        <iconify-icon icon="lucide:copy" id="copyIcon"></iconify-icon><span id="copyBtnText">复制文本</span>
+      </button>
+      <button id="downloadBtn">
+        <iconify-icon icon="lucide:download"></iconify-icon>下载文件
+      </button>
+      <button class="ghost" id="restartBtn">
+        <iconify-icon icon="lucide:rotate-ccw"></iconify-icon>转换下一个
+      </button>
+    </div>
+  </div>
+
+  <footer>PureMark · Zero Trust 保护，仅限授权访问</footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+(() => {
+  const API_BASE = "https://md.sergget.qzz.io";
+
+  // ====== 深浅色主题智能控制系统 ======
+  const themeToggle = document.getElementById("themeToggle");
+  const themeIcon = document.getElementById("themeIcon");
+  
+  function setTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("sergget-theme", theme);
+    themeIcon.setAttribute("icon", theme === "dark" ? "lucide:sun" : "lucide:moon");
+  }
+
+  // 智能初始化：优先读取本地缓存；若无缓存则根据当前小时数判断（晚18点-早6点为暗黑模式）
+  const savedTheme = localStorage.getItem("sergget-theme");
+  if (savedTheme) {
+    setTheme(savedTheme);
+  } else {
+    const hour = new Date().getHours();
+    if (hour >= 18 || hour < 6) {
+      setTheme("dark");
+    } else {
+      setTheme("light");
+    }
+  }
+
+  themeToggle.addEventListener("click", () => {
+    const currentTheme = document.documentElement.getAttribute("data-theme");
+    setTheme(currentTheme === "dark" ? "light" : "dark");
+  });
+
+  // ---- feature detection ----
+  const pdfjsOk = typeof pdfjsLib !== "undefined";
+  if (pdfjsOk) {
+    try {
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    } catch {}
+  }
+  const cropperOk = typeof Cropper !== "undefined";
+
+  function abortTimeout(ms) {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      return AbortSignal.timeout(ms);
+    }
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), ms);
+    return ctrl.signal;
+  }
+
+  const IMAGE_EXT = ["png","jpg","jpeg","bmp","tif","tiff","webp"];
+  const NO_CROP_EXT = ["docx","xlsx","pptx","csv","txt","md","html","htm",
+                        "epub","odp","ods","odt","rtf","xml","json","zip"];
+
+  const $ = (id) => document.getElementById(id);
+  const drop = $("drop"), fileInput = $("fileInput");
+  const cropPanel = $("cropPanel"), cropStage = $("cropStage");
+  const noCropMsg = $("noCropMsg"), cropMeta = $("cropMeta");
+  const resultPanel = $("resultPanel"), resultEl = $("result");
+  const resultMeta = $("resultMeta");
+  const statusIcon = $("statusIcon"), statusText = $("statusText");
+
+  let currentFile = null;
+  let cropper = null;
+  let hasCropUI = false;
+  let lastConvertedName = "";
+  let lastResult = null;
+  let pdfDoc = null;
+  let pdfCurrentPage = 1;
+  let pdfNumPages = 1;
+  let pdfRenderToken = 0;
+
+  // ====== 事件监听器 ======
+  drop.addEventListener("click", () => fileInput.click());
+  ["dragenter","dragover"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
+  ["dragleave","drop"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
+  drop.addEventListener("drop", e => {
+    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener("change", e => {
+    if (e.target.files.length) handleFile(e.target.files[0]);
+  });
+
+  // ---- health check ----
+  async function pollHealth() {
+    try {
+      const r = await fetch(`${API_BASE}/health`, { signal: abortTimeout(2500) });
+      if (!r.ok) throw new Error();
+      const d = await r.json();
+      statusIcon.setAttribute("icon", "lucide:circle-check");
+      statusIcon.className = "status-up";
+      statusText.textContent = `在线 · ${d.node ?? "ubuntu"}`;
+    } catch {
+      statusIcon.setAttribute("icon", "lucide:circle-alert");
+      statusIcon.className = "status-down";
+      statusText.textContent = "无法连接";
+    }
+  }
+  pollHealth();
+  setInterval(pollHealth, 20000);
+
+  function extOf(name) {
+    const m = name.toLowerCase().match(/\.([a-z0-9]+)$/);
+    return m ? m[1] : "";
+  }
+
+  const MEANINGLESS_SAME_FORMAT = ["docx"];
+
+  function updateOutputFormatAvailability(ext) {
+    const hintId = "fmtDisabledHint";
+    let hint = $(hintId);
+    if (!hint) {
+      hint = document.createElement("div");
+      hint.id = hintId;
+      hint.className = "fmt-hint";
+      $("fmtRow").insertAdjacentElement("afterend", hint);
+    }
+
+    let disabledValue = null;
+    if (MEANINGLESS_SAME_FORMAT.includes(ext)) disabledValue = ext;
+
+    document.querySelectorAll('input[name="outputFormat"]').forEach((radio) => {
+      const label = radio.closest("label");
+      const shouldDisable = radio.value === disabledValue;
+      radio.disabled = shouldDisable;
+      label.classList.toggle("disabled", shouldDisable);
+      if (shouldDisable && radio.checked) {
+        const fallback = document.querySelector('input[name="outputFormat"][value="md"]');
+        if (fallback) fallback.checked = true;
+      }
+    });
+
+    if (disabledValue) {
+      hint.textContent = `源文件已是 .${disabledValue}，无法再转换为 .${disabledValue}（会先转成 Markdown 再重新生成，原始格式会丢失，没有意义）`;
+      hint.style.display = "block";
+    } else {
+      hint.style.display = "none";
+    }
+  }
+
+  async function handleFile(file) {
+    currentFile = file;
+    resultPanel.classList.remove("show");
+    destroyCropper();
+    const ext = extOf(file.name);
+    $("fnameCrop").textContent = file.name;
+    cropStage.innerHTML = "";
+    cropPanel.classList.add("show");
+    updateOutputFormatAvailability(ext);
+
+    try {
+      if (ext === "pdf") {
+        hasCropUI = true;
+        noCropMsg.style.display = "none";
+        await mountPdfCropper(file);
+      } else if (IMAGE_EXT.includes(ext)) {
+        hasCropUI = true;
+        noCropMsg.style.display = "none";
+        mountImageCropper(URL.createObjectURL(file));
+      } else if (NO_CROP_EXT.includes(ext)) {
+        hasCropUI = false;
+        noCropMsg.style.display = "block";
+        cropMeta.textContent = "";
+      } else {
+        hasCropUI = false;
+        noCropMsg.style.display = "block";
+        noCropMsg.textContent = `未识别的格式 .${ext}，将尝试直接提交，若服务端不支持会返回错误`;
+        cropMeta.textContent = "";
+      }
+    } catch (err) {
+      console.warn("Crop UI init failed:", err);
+      hasCropUI = false;
+      noCropMsg.style.display = "block";
+      noCropMsg.textContent = "裁剪界面初始化失败，可跳过裁剪直接转换全文。";
+      cropMeta.textContent = "";
+    }
+  }
+
+  function mountImageCropper(src) {
+    if (!cropperOk) {
+      hasCropUI = false;
+      noCropMsg.style.display = "block";
+      noCropMsg.textContent = "Cropper.js 未加载，不支持区域裁剪。请跳过裁剪直接转换全文。";
+      cropMeta.textContent = "";
+      return;
+    }
+    const img = document.createElement("img");
+    img.src = src;
+    img.className = "stage-preview";
+    cropStage.appendChild(img);
+    img.onload = () => {
+      cropper = new Cropper(img, {
+        viewMode: 1,
+        autoCropArea: 0.8,
+        background: false,
+        movable: true,
+        zoomable: true,
+        crop: updateCropMeta,
+      });
+    };
+  }
+
+  async function mountPdfCropper(file) {
+    if (!pdfjsOk || !cropperOk) {
+      hasCropUI = false;
+      noCropMsg.style.display = "block";
+      noCropMsg.textContent = "PDF.js 或 Cropper.js 未加载，无法生成裁剪预览。请直接转换全文。";
+      cropMeta.textContent = "";
+      return;
+    }
+    const buf = await file.arrayBuffer();
+    pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
+    pdfNumPages = pdfDoc.numPages;
+    pdfCurrentPage = 1;
+
+    if (pdfNumPages > 1) {
+      const nav = document.createElement("div");
+      nav.className = "pdf-nav";
+      nav.innerHTML = `
+        <button class="ghost" id="pdfPrevBtn" type="button"><iconify-icon icon="lucide:chevron-left"></iconify-icon> 上一页</button>
+        <span>第
+          <input class="pageInput" id="pdfPageInput" type="number" min="1" max="${pdfNumPages}" value="1">
+          <span class="pageSep">/</span> ${pdfNumPages} 页
+        </span>
+        <button class="ghost" id="pdfNextBtn" type="button">下一页 <iconify-icon icon="lucide:chevron-right"></iconify-icon></button>
+      `;
+      cropStage.appendChild(nav);
+
+      $("pdfPrevBtn").addEventListener("click", () => goToPdfPage(pdfCurrentPage - 1));
+      $("pdfNextBtn").addEventListener("click", () => goToPdfPage(pdfCurrentPage + 1));
+      $("pdfPageInput").addEventListener("change", (e) => {
+        goToPdfPage(parseInt(e.target.value, 10) || 1);
+      });
+
+      const note = document.createElement("div");
+      note.className = "crop-meta";
+      note.id = "pdfCropNote";
+      note.textContent = "裁剪框会按同一比例应用到所有页面。";
+      cropStage.appendChild(note);
+    }
+
+    await renderPdfPage(1);
+  }
+
+  async function renderPdfPage(pageNum) {
+    pageNum = Math.min(Math.max(1, pageNum), pdfNumPages);
+    pdfCurrentPage = pageNum;
+    const myToken = ++pdfRenderToken;
+
+    const pageInput = $("pdfPageInput");
+    if (pageInput) pageInput.value = pageNum;
+    const prevBtn = $("pdfPrevBtn"), nextBtn = $("pdfNextBtn");
+    if (prevBtn) prevBtn.disabled = pageNum <= 1;
+    if (nextBtn) nextBtn.disabled = pageNum >= pdfNumPages;
+
+    const prevRatio = cropStage._ratio || null;
+
+    const page = await pdfDoc.getPage(pageNum);
+    if (myToken !== pdfRenderToken) return;
+    const viewport = page.getViewport({ scale: 1.8 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+    if (myToken !== pdfRenderToken) return;
+
+    if (cropper) { cropper.destroy(); cropper = null; }
+    const oldImg = cropStage.querySelector("img.stage-preview");
+    if (oldImg) oldImg.remove();
+
+    const img = document.createElement("img");
+    img.src = canvas.toDataURL("image/png");
+    img.className = "stage-preview";
+    cropStage.appendChild(img);
+    hasCropUI = true;
+    img.onload = () => {
+      if (myToken !== pdfRenderToken) return;
+      cropper = new Cropper(img, {
+        viewMode: 1,
+        autoCropArea: 0.8,
+        background: false,
+        movable: true,
+        zoomable: true,
+        crop: updateCropMeta,
+        ready() {
+          if (prevRatio) {
+            const imgData = cropper.getImageData();
+            cropper.setData({
+              x: prevRatio.x * imgData.naturalWidth,
+              y: prevRatio.y * imgData.naturalHeight,
+              width: prevRatio.width * imgData.naturalWidth,
+              height: prevRatio.height * imgData.naturalHeight,
+            });
+          }
+          updateCropMeta();
+        },
+      });
+    };
+  }
+
+  function goToPdfPage(pageNum) {
+    if (!pdfDoc) return;
+    pageNum = Math.min(Math.max(1, pageNum), pdfNumPages);
+    if (pageNum === pdfCurrentPage) return;
+    renderPdfPage(pageNum);
+  }
+
+  function updateCropMeta() {
+    if (!cropper) return;
+    const data = cropper.getData(true);
+    const img = cropper.getImageData();
+    const ratio = {
+      unit: "ratio",
+      x: +(data.x / img.naturalWidth).toFixed(4),
+      y: +(data.y / img.naturalHeight).toFixed(4),
+      width: +(data.width / img.naturalWidth).toFixed(4),
+      height: +(data.height / img.naturalHeight).toFixed(4),
+    };
+    cropMeta.textContent =
+      `裁剪比例 x:${ratio.x} y:${ratio.y} w:${ratio.width} h:${ratio.height}`;
+    cropStage._ratio = ratio;
+  }
+
+  function destroyCropper() {
+    if (cropper) { cropper.destroy(); cropper = null; }
+    hasCropUI = false;
+    pdfDoc = null;
+    pdfCurrentPage = 1;
+    pdfNumPages = 1;
+    pdfRenderToken++;
+  }
+
+  $("resetCropBtn").addEventListener("click", () => {
+    if (cropper) cropper.reset();
+  });
+
+  $("skipCropBtn").addEventListener("click", () => submit(null));
+  $("submitBtn").addEventListener("click", () => {
+    const crop = (hasCropUI && cropStage._ratio) ? cropStage._ratio : null;
+    submit(crop);
+  });
+
+  async function submit(crop) {
+    if (!currentFile) return;
+    const submitBtn = $("submitBtn");
+    const submitIcon = $("submitIcon");
+    const submitText = $("submitText");
+    
+    submitBtn.disabled = true;
+    submitIcon.outerHTML = '<span class="spinner" id="submitIcon"></span>';
+    submitText.textContent = "转换中…";
+
+    const fmtInput = document.querySelector('input[name="outputFormat"]:checked');
+    const outputFormat = fmtInput ? fmtInput.value : "md";
+
+    const fd = new FormData();
+    fd.append("file", currentFile);
+    if (crop) fd.append("crop", JSON.stringify(crop));
+    fd.append("output_format", outputFormat);
+
+    const t0 = performance.now();
+    try {
+      const r = await fetch(`${API_BASE}/convert`, { method: "POST", body: fd });
+      const data = await r.json().catch(() => null);
+      const elapsed = Math.round(performance.now() - t0);
+
+      if (!r.ok || !data || data.success === false) {
+        showResult({ error: data?.error || `HTTP ${r.status}` }, elapsed);
+      } else {
+        showResult(data, elapsed);
+      }
+    } catch (err) {
+      showResult({ error: err.message || "网络请求失败" }, Math.round(performance.now() - t0));
+    } finally {
+      submitBtn.disabled = false;
+      $("submitIcon").outerHTML = '<iconify-icon icon="lucide:zap" id="submitIcon"></iconify-icon>';
+      submitText.textContent = "提交转换";
+    }
+  }
+
+  function showResult(data, clientElapsed) {
+    resultPanel.classList.add("show");
+    resultPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    lastResult = data;
+
+    const copyBtn = $("copyBtn");
+
+    if (data.error) {
+      resultMeta.innerHTML = `<span class="error">错误</span>`;
+      resultEl.textContent = data.error;
+      resultEl.classList.add("error");
+      copyBtn.disabled = true;
+      return;
+    }
+    resultEl.classList.remove("error");
+    const meta = [];
+    if (data.engine) meta.push(`引擎 <b>${data.engine}</b>`);
+    if (data.output_format) meta.push(`格式 <b>${data.output_format}</b>`);
+    if (data.elapsed_ms != null) meta.push(`耗时 <b>${data.elapsed_ms}ms</b>`);
+    meta.push(`往返 <b>${clientElapsed}ms</b>`);
+    resultMeta.innerHTML = meta.join(" · ");
+
+    if (data.file_base64) {
+      resultEl.classList.add("docx-notice");
+      resultEl.textContent =
+        `「${data.output_filename || "converted.docx"}」已生成，点击下方“下载”按钮保存到本地。`;
+      copyBtn.disabled = true;
+    } else {
+      resultEl.classList.remove("docx-notice");
+      const text = data.text ?? data.content ?? data.markdown ?? JSON.stringify(data, null, 2);
+      resultEl.textContent = text;
+      copyBtn.disabled = false;
+    }
+    lastConvertedName = data.output_filename ||
+      (currentFile.name.replace(/\.[^.]+$/, "") + ".md");
+  }
+
+  $("copyBtn").addEventListener("click", () => {
+    if ($("copyBtn").disabled) return;
+    navigator.clipboard.writeText(resultEl.textContent);
+    const btnText = $("copyBtnText");
+    const icon = $("copyIcon");
+    
+    btnText.textContent = "已复制";
+    icon.setAttribute("icon", "lucide:check");
+    
+    setTimeout(() => {
+      btnText.textContent = "复制文本";
+      icon.setAttribute("icon", "lucide:copy");
+    }, 1500);
+  });
+
+  $("downloadBtn").addEventListener("click", () => {
+    if (!lastResult || lastResult.error) return;
+
+    if (lastResult.file_base64) {
+      const byteChars = atob(lastResult.file_base64);
+      const byteNumbers = new Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+      const blob = new Blob([new Uint8Array(byteNumbers)], {
+        type: lastResult.mime_type ||
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = lastResult.output_filename || "converted.docx";
+      a.click();
+    } else {
+      const blob = new Blob([resultEl.textContent], {
+        type: (lastResult && lastResult.mime_type) || "text/markdown",
+      });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = lastConvertedName || "converted.md";
+      a.click();
+    }
+  });
+
+  $("restartBtn").addEventListener("click", () => {
+    currentFile = null;
+    lastResult = null;
+    destroyCropper();
+    cropPanel.classList.remove("show");
+    resultPanel.classList.remove("show");
+    resultEl.classList.remove("docx-notice");
+    $("copyBtn").disabled = false;
+    const mdRadio = document.querySelector('input[name="outputFormat"][value="md"]');
+    if (mdRadio) mdRadio.checked = true;
+    updateOutputFormatAvailability(null);
+    fileInput.value = "";
+  });
+})();
+</script>
+</body>
+</html>

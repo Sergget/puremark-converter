@@ -1,0 +1,26 @@
+[Unit]
+Description=MarkItDown Document Conversion Service (Ubuntu light node)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/markitdown
+Environment=NODE_NAME=ubuntu
+Environment=NODE_ROLE=light
+Environment=PORT=5000
+Environment=MAX_FILE_SIZE_MB=50
+Environment=WIN11_OCR_URL=http://192.168.0.81:5000
+Environment=OCR_TIMEOUT=120
+Environment=PDF_TEXT_THRESHOLD=50
+ExecStart=/var/www/markitdown/venv/bin/python3 /var/www/markitdown/app.py
+Restart=on-failure
+RestartSec=3
+
+# 安全加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
