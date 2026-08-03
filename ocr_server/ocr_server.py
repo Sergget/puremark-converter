@@ -48,6 +48,18 @@ NODE_NAME = os.environ.get("NODE_NAME", "win11")
 NODE_ROLE = os.environ.get("NODE_ROLE", "heavy")
 PORT = int(os.environ.get("PORT", 5000))
 
+# 从命令行参数获取端口，如果命令行参数未提供，则使用环境变量或默认值
+# 这是为了方便在不修改服务配置的情况下临时更改端口进行测试
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description="OCR Server")
+    parser.add_argument(
+        '--port', type=int, default=PORT, help='Listening port for the server'
+    )
+    args = parser.parse_args()
+    PORT = args.port
+    logging.info(f"Effective PORT after parsing arguments: {PORT}")
+
 # 业务参数（可通过环境变量覆盖，不设就是内置默认值）
 MAX_FILE_SIZE_MB = int(os.environ.get("OCR_MAX_FILE_MB", 100))       # 文件大小上限
 MAX_PDF_PAGES = int(os.environ.get("OCR_MAX_PDF_PAGES", 200))        # PDF 页数上限
