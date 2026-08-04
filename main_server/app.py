@@ -129,6 +129,40 @@ PDF_TEXT_THRESHOLD = int(os.environ.get("PDF_TEXT_THRESHOLD", 50))  # PDF 分类
 CROP_PDF_ZOOM = float(os.environ.get("CROP_PDF_ZOOM", 2.0))  # 扫描型 PDF 裁剪渲染倍率（越高越清晰，越慢）
 CROP_EPS = 1e-4  # 裁剪比例边界判断的浮点误差容忍
 
+# ---- 本地 PaddleOCR 延迟加载初始化与并发锁 ----
+_local_ocr_instance = None
+_local_ocr_init_lock = threading.Lock()
+_local_ocr_exec_lock = threading.Lock()  # 保护 PaddleOCR 推理过程，防止多线程并发抢占 C++ 引擎状态
+_local_ocr_init_error = None
+
+
+def get_local_ocr():
+    """获取本地 PaddleOCR 单例（CPU 模式）。在 Win11 离线时首次请求触发初始化，不占用常驻内存。"""
+    global _local_ocr_instance, _local_ocr_init_error
+    if _local_ocr_instance is not None:
+        return _local_ocr_instance
+    if _local_ocr_init_error is not None:
+        return None
+    with _local_ocr_init_lock:
+        if _local_ocr_instance is not None:
+            return _local_ocr_instance
+        if _local_ocr_init_error is not None:
+            return None
+        try:
+            from paddleocr import PaddleOCR
+            app.logger.info("[main_server] 正在初始化本地 PaddleOCR（首次加载模型，CPU 模式）...")
+            _local_ocr_instance = PaddleOCR(
+                lang="ch",
+                use_angle_cls=False,       # 关闭方向分类，节省内存
+                use_gpu=False,             # 本地也使用 CPU 模式
+            )
+            app.logger.info("[main_server] 本地 PaddleOCR 初始化完成（CPU 模式）")
+            return _local_ocr_instance
+        except Exception as e:
+            _local_ocr_init_error = str(e)
+            app.logger.error(f"[main_server] 本地 PaddleOCR 初始化失败: {e}")
+            return None
+
 # ---- 版面重建（基于 Win11 返回的行级 bbox 做几何启发式段落/标题分组）----
 LAYOUT_RECONSTRUCTION_ENABLED = os.environ.get(
     "LAYOUT_RECONSTRUCTION_ENABLED", "true"
@@ -180,6 +214,10 @@ def health():
     with _lock:
         active = _active_tasks
 
+    # 探活 Win11 节点
+    win11_info = _check_win11_health()
+    win11_status = "UP" if win11_info is not None else "DOWN"
+
     return jsonify({
         "status": "UP",
         "node": NODE_NAME,
@@ -192,6 +230,7 @@ def health():
         "gpu_available": False,
         "gpu_usable": False,
         "ocr_mode": "none",
+        "win11_status": win11_status,
     }), 200
 
 
@@ -329,7 +368,7 @@ def _forward_to_win11(file_bytes: bytes, filename: str, include_lines: bool = Tr
 def _check_win11_health() -> dict:
     """快速探活 Win11 节点，返回健康信息或 None。"""
     try:
-        resp = requests.get(f"{WIN11_OCR_URL}/health", timeout=5)
+        resp = requests.get(f"{WIN11_OCR_URL}/health", timeout=2)
         return resp.json() if resp.ok else None
     except Exception:
         return None
@@ -607,16 +646,94 @@ def _apply_layout_reconstruction(result: dict, force_page_markers: bool = False)
     result.pop("lines", None)
 
 
+def _extract_lines(ocr_result, page_num=None):
+    """从 PaddleOCR 的原始输出中提取结构化行信息（文字 + bbox 坐标 + 置信度）。"""
+    if ocr_result is None or len(ocr_result) == 0:
+        return []
+    page_result = ocr_result[0]
+    if page_result is None:
+        return []
+    lines = []
+    for item in page_result:
+        if item is None:
+            continue
+        try:
+            bbox_raw, (text, confidence) = item
+            if not text or not text.strip():
+                continue
+            bbox = [[round(float(x), 1), round(float(y), 1)] for x, y in bbox_raw]
+            line = {
+                "text": text,
+                "bbox": bbox,
+                "confidence": round(float(confidence), 4),
+            }
+            if page_num is not None:
+                line["page"] = page_num
+            lines.append(line)
+        except Exception:
+            continue
+    return lines
+
+
+def _lines_to_text(lines):
+    """把结构化行按识别顺序拼接成一段文本。"""
+    return "\n".join(line["text"] for line in lines)
+
+
+def _do_ocr_local(file_bytes, ext, file_type, original_filename):
+    """在本地运行 PaddleOCR CPU 模式。全程在内存中流转，不落盘。"""
+    ocr = get_local_ocr()
+    if ocr is None:
+        raise RuntimeError(f"Local OCR engine not available. Init error: {_local_ocr_init_error or 'unknown'}")
+
+    if file_type == "image":
+        import numpy as np
+        img = Image.open(io.BytesIO(file_bytes))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img_array = np.array(img)
+
+        with _local_ocr_exec_lock:
+            raw_result = ocr.ocr(img_array, cls=False)
+        page_lines = _extract_lines(raw_result)
+        text = _lines_to_text(page_lines)
+        return {"text": text, "pages": 1, "lines": page_lines}
+
+    elif file_type == "pdf":
+        import numpy as np
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        page_count = doc.page_count
+
+        all_texts = []
+        all_lines = []
+        for page_num in range(page_count):
+            page = doc[page_num]
+            pix = page.get_pixmap(dpi=150)
+            img_bytes = pix.tobytes("png")
+
+            img = Image.open(io.BytesIO(img_bytes))
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img_array = np.array(img)
+
+            with _local_ocr_exec_lock:
+                raw_result = ocr.ocr(img_array, cls=False)
+            page_lines = _extract_lines(raw_result, page_num=page_num + 1)
+            page_text = _lines_to_text(page_lines)
+
+            if page_text.strip():
+                all_texts.append(f"--- 第 {page_num + 1} 页 ---\n{page_text}")
+            all_lines.extend(page_lines)
+
+        doc.close()
+        text = "\n\n".join(all_texts)
+        return {"text": text, "pages": page_count, "lines": all_lines}
+
+
 def _convert_ocr_cropped_pdf(file_bytes: bytes, filename: str, crop: dict,
                               t_start: float) -> dict:
-    """扫描型 PDF + 裁剪：逐页裁剪渲染后转发 Win11 OCR，拼接结果。"""
+    """扫描型 PDF + 裁剪：逐页裁剪渲染后转发 Win11 OCR，拼接结果。支持本地 OCR 降级。"""
     win11_health = _check_win11_health()
-    if win11_health is None:
-        return {
-            "success": False,
-            "error": "Win11 OCR node unreachable, cannot apply crop to scanned PDF",
-            "filename": filename,
-        }, 503
 
     try:
         page_images = _crop_pdf_page_images(file_bytes, crop)
@@ -630,17 +747,46 @@ def _convert_ocr_cropped_pdf(file_bytes: bytes, filename: str, crop: dict,
     page_texts = []
     page_errors = []
     all_lines = []
-    for page_no, img_bytes in page_images:
-        result, status = _forward_to_win11(img_bytes, f"{filename}_page{page_no}.png")
-        if result.get("success"):
-            page_texts.append(f"<!-- page {page_no} -->\n{_extract_ocr_text(result)}")
-            # 每张裁剪图对 Win11 来说都是独立的单页图片，它自己不会打 page 字段，
-            # 这里用循环里真实的原始页码覆盖/补上，保证跨页重建时页码对得上。
-            for ln in result.get("lines") or []:
-                ln["page"] = page_no
-                all_lines.append(ln)
-        else:
-            page_errors.append({"page": page_no, "error": result.get("error", f"HTTP {status}")})
+
+    if win11_health is None:
+        # Win11 不可用，本地 OCR 降级转换
+        app.logger.info(f"Win11 OCR 节点不可达，降级为本地 OCR 识别裁剪后的扫描型 PDF: {filename}")
+        ocr = get_local_ocr()
+        if ocr is None:
+            return {
+                "success": False,
+                "error": f"Win11 OCR unreachable and local OCR not available: {_local_ocr_init_error or 'unknown'}",
+                "filename": filename,
+            }, 503
+
+        import numpy as np
+        for page_no, img_bytes in page_images:
+            try:
+                img = Image.open(io.BytesIO(img_bytes))
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img_array = np.array(img)
+                with _local_ocr_exec_lock:
+                    raw_result = ocr.ocr(img_array, cls=False)
+                page_lines = _extract_lines(raw_result, page_num=page_no)
+                page_text = _lines_to_text(page_lines)
+                page_texts.append(f"<!-- page {page_no} -->\n{page_text}")
+                all_lines.extend(page_lines)
+            except Exception as e:
+                page_errors.append({"page": page_no, "error": f"Local OCR error: {e}"})
+    else:
+        # 转发 Win11 OCR
+        for page_no, img_bytes in page_images:
+            result, status = _forward_to_win11(img_bytes, f"{filename}_page{page_no}.png")
+            if result.get("success"):
+                page_texts.append(f"<!-- page {page_no} -->\n{_extract_ocr_text(result)}")
+                # 每张裁剪图对 Win11 来说都是独立的单页图片，它自己不会打 page 字段，
+                # 这里用循环里真实的原始页码覆盖/补上，保证跨页重建时页码对得上。
+                for ln in result.get("lines") or []:
+                    ln["page"] = page_no
+                    all_lines.append(ln)
+            else:
+                page_errors.append({"page": page_no, "error": result.get("error", f"HTTP {status}")})
 
     elapsed_ms = round((time.perf_counter() - t_start) * 1000)
 
@@ -657,8 +803,8 @@ def _convert_ocr_cropped_pdf(file_bytes: bytes, filename: str, crop: dict,
         "success": True,
         "filename": filename,
         "content": "\n\n".join(page_texts),
-        "engine": "paddleocr_cpu",
-        "routed_to": "win11_ocr",
+        "engine": "paddleocr_cpu_local" if win11_health is None else "paddleocr_cpu",
+        "routed_to": "local_ocr" if win11_health is None else "win11_ocr",
         "crop_applied": True,
         "pages_processed": len(page_images),
         "route_elapsed_ms": elapsed_ms,
@@ -1037,23 +1183,43 @@ def _convert_local(file_bytes: bytes, filename: str, ext: str,
 
 def _convert_ocr(file_bytes: bytes, filename: str,
                  t_start: float) -> tuple:
-    """转发到 Win11 OCR 节点。包含健康检查驱动的故障转移。返回 (dict, status)。"""
+    """转发到 Win11 OCR 节点。包含健康检查驱动的故障转移和本地 OCR 降级。返回 (dict, status)。"""
     win11_health = _check_win11_health()
 
     if win11_health is None:
-        # Win11 不可达 — 尝试本地降级（仅 PDF；图片没有本地降级路径）
+        # Win11 不可达 — 降级为本地 OCR 识别
+        app.logger.info(f"Win11 OCR 节点不可达，降级为本地 OCR 识别: {filename}")
         _, ext = os.path.splitext(filename)
         ext = ext.lower()
-        if ext == PDF_EXTENSION:
-            try:
-                return _convert_local(file_bytes, filename, ext, t_start)
-            except Exception:
-                pass
-        return {
-            "success": False,
-            "error": "Win11 OCR node unreachable and no local fallback for this format",
-            "filename": filename,
-        }, 503
+        file_type = "pdf" if ext == PDF_EXTENSION else "image"
+        try:
+            result = _do_ocr_local(file_bytes, ext, file_type, filename)
+            elapsed_ms = round((time.perf_counter() - t_start) * 1000)
+            resp = {
+                "success": True,
+                "filename": filename,
+                "content": result["text"],
+                "engine": "paddleocr_cpu_local",
+                "routed_to": "local_ocr",
+                "pages": result["pages"],
+                "lines": result["lines"],
+                "elapsed_ms": elapsed_ms,
+                "route_elapsed_ms": elapsed_ms,
+            }
+            _apply_layout_reconstruction(resp)
+            return resp, 200
+        except Exception as e:
+            app.logger.error(f"本地 OCR 降级转换失败: {e}")
+            if ext == PDF_EXTENSION:
+                try:
+                    return _convert_local(file_bytes, filename, ext, t_start)
+                except Exception:
+                    pass
+            return {
+                "success": False,
+                "error": f"Win11 OCR node unreachable and local OCR failed: {e}",
+                "filename": filename,
+            }, 503
 
     result, status = _forward_to_win11(file_bytes, filename)
     elapsed_ms = round((time.perf_counter() - t_start) * 1000)

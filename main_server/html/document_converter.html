@@ -57,8 +57,8 @@
   #themeToggle { background: transparent; border: 1px solid var(--line); border-radius: 6px; color: var(--text); padding: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 18px; }
   #themeToggle:hover { border-color: var(--accent); color: var(--accent); }
 
-  #status { font-family: var(--font-mono); font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 8px; background: var(--panel); padding: 6px 14px; border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); }
-  #status iconify-icon { font-size: 15px; }
+  #status, #win11Status { font-family: var(--font-mono); font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 8px; background: var(--panel); padding: 6px 14px; border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); }
+  #status iconify-icon, #win11Status iconify-icon { font-size: 15px; }
   .status-up { color: var(--accent); }
   .status-down { color: var(--warn); }
 
@@ -128,9 +128,13 @@
       <button id="themeToggle" title="切换主题">
         <iconify-icon icon="lucide:sun" id="themeIcon"></iconify-icon>
       </button>
-      <div id="status">
+      <div id="status" title="Ubuntu 调度节点">
         <iconify-icon icon="lucide:circle-alert" id="statusIcon"></iconify-icon>
-        <span id="statusText">检测中</span>
+        <span id="statusText">调度节点</span>
+      </div>
+      <div id="win11Status" title="Windows 11 OCR加速节点">
+        <iconify-icon icon="lucide:circle-alert" id="win11StatusIcon"></iconify-icon>
+        <span id="win11StatusText">加速节点</span>
       </div>
     </div>
   </header>
@@ -252,6 +256,7 @@
   const resultPanel = $("resultPanel"), resultEl = $("result");
   const resultMeta = $("resultMeta");
   const statusIcon = $("statusIcon"), statusText = $("statusText");
+  const win11StatusIcon = $("win11StatusIcon"), win11StatusText = $("win11StatusText");
 
   let currentFile = null;
   let cropper = null;
@@ -282,13 +287,30 @@
       const r = await fetch(`${API_BASE}/health`, { signal: abortTimeout(2500) });
       if (!r.ok) throw new Error();
       const d = await r.json();
+      
+      // 主节点 (Ubuntu) 状态
       statusIcon.setAttribute("icon", "lucide:circle-check");
       statusIcon.className = "status-up";
       statusText.textContent = `在线 · ${d.node ?? "ubuntu"}`;
+
+      // Win11 OCR 节点状态
+      if (d.win11_status === "UP") {
+        win11StatusIcon.setAttribute("icon", "lucide:circle-check");
+        win11StatusIcon.className = "status-up";
+        win11StatusText.textContent = "Win11 · 在线";
+      } else {
+        win11StatusIcon.setAttribute("icon", "lucide:circle-alert");
+        win11StatusIcon.className = "status-down";
+        win11StatusText.textContent = "Win11 · 离线";
+      }
     } catch {
       statusIcon.setAttribute("icon", "lucide:circle-alert");
       statusIcon.className = "status-down";
       statusText.textContent = "无法连接";
+
+      win11StatusIcon.setAttribute("icon", "lucide:circle-alert");
+      win11StatusIcon.className = "status-down";
+      win11StatusText.textContent = "Win11 · 未知";
     }
   }
   pollHealth();
