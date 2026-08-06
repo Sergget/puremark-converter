@@ -24,8 +24,16 @@ import signal
 MAIN_SERVER_PORT = 8000
 OCR_SERVER_PORT = 8001
 
-# 获取 Python 解释器路径，优先使用当前虚拟环境的解释器
-PYTHON_EXE = sys.executable
+# 获取 Python 解释器路径：优先使用本仓库虚拟环境里的解释器（其中装齐了
+# pdfplumber / fitz / markitdown / python-docx / flask 等依赖），否则回退到
+# 当前 sys.executable。这样无论用系统 python 还是 .venv 的 python 启动本脚本，
+# 拉起的主/OCR 服务都会使用同一套已装好依赖的解释器。
+_PYTHON_EXE = sys.executable
+_venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "Scripts", "python.exe")
+if os.path.isfile(_venv_python):
+    PYTHON_EXE = _venv_python
+else:
+    PYTHON_EXE = _PYTHON_EXE
 
 def log_stream(stream, prefix, color_code=None):
     """

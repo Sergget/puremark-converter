@@ -87,6 +87,8 @@ from PIL import Image
 from markitdown import MarkItDown
 from docx import Document
 from docx.shared import Pt
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 app = Flask(__name__)
 
@@ -849,7 +851,12 @@ def _convert_ocr_cropped_pdf(file_bytes: bytes, filename: str, crop: dict,
 
 SUPPORTED_OUTPUT_FORMATS = {"md", "txt", "docx"}
 
-_INLINE_TOKEN_RE = re.compile(r'(\*\*\*.+?\*\*\*|\*\*.+?\*\*|\*.+?\*|__.+?__|_.+?_|`[^`]+?`)')
+_INLINE_TOKEN_RE = re.compile(
+    r'(\*\*\*.+?\*\*\*|\*\*.+?\*\*|\*.+?\*|__.+?__|_.+?_|`[^`]+?`|'
+    r'!\[[^\]]*\]\([^)]*\)|\[[^\]]+\]\([^)]*\))'
+)
+
+_TABLE_SEP_CELL_RE = re.compile(r'^:?-{2,}:?$')  # 匹配表格分隔行单元格（如 --- / :---: / ---:）
 
 
 def _validate_output_format(raw: str) -> str:
@@ -861,27 +868,58 @@ def _validate_output_format(raw: str) -> str:
 
 
 def _strip_markdown_light(md_text: str) -> str:
-    """轻量剥离常见 Markdown 语法符号，得到更接近纯文本的内容（用于 txt 输出）。
-    注意：这不是完整的 Markdown 解析器，只做常见符号的正则替换。"""
+    """剥离常见 Markdown 语法符号，得到更接近纯文本的内容（用于 txt 输出）。
+    覆盖：标题、引用块、代码块、表格、粗体/斜体、行内代码、链接/图片、分隔线、
+    列表符号与多余空行。注意：这不是完整 Markdown 解析器，只做常见符号替换。"""
     text = md_text or ""
     text = re.sub(r'^(#{1,6})\s+', '', text, flags=re.MULTILINE)              # 标题符号
+    text = re.sub(r'^>\s?', '', text, flags=re.MULTILINE)                      # 引用块前缀
     text = re.sub(r'^```[^\n]*\n', '', text, flags=re.MULTILINE)              # 代码块起始围栏
     text = re.sub(r'^```\s*$', '', text, flags=re.MULTILINE)                  # 代码块结束围栏
+    text = re.sub(r'!\[([^\]]*)\]\([^)]*\)', r'\1', text)                      # 图片 → 保留 alt
+    text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)                       # 链接 → 保留文字
     text = re.sub(r'(\*\*\*|\*\*|\*|__|_)(.+?)\1', r'\2', text)               # 粗体/斜体
     text = re.sub(r'`([^`]+)`', r'\1', text)                                  # 行内代码
+    # 表格：去掉管道符与单元格定界，丢弃分隔行与全空行
+    plain_lines = []
+    for _line in text.splitlines():
+        _stripped = _line.strip()
+        if _stripped.startswith('|'):
+            _cells = [c.strip() for c in _stripped.strip('|').split('|')]
+            if all(_TABLE_SEP_CELL_RE.fullmatch(c) for c in _cells if c):
+                continue                                  # 分隔行（| --- | --- |）
+            if not any(_cells):
+                continue                                  # 全空单元格行
+            plain_lines.append('   '.join(_cells))
+        else:
+            plain_lines.append(_line)
+    text = '\n'.join(plain_lines)
+    text = re.sub(r'^(\s*[-*_]\s*){3,}\s*$', '', text, flags=re.MULTILINE)    # 分隔线
     text = re.sub(r'^\s*[-*+]\s+', '- ', text, flags=re.MULTILINE)            # 无序列表符号统一
     text = re.sub(r'\n{3,}', '\n\n', text)                                    # 多余空行收敛
     return text.strip()
 
 
 def _add_inline_runs(paragraph, text: str) -> None:
-    """将一行文本中的 **粗体**、*斜体*、`行内代码` 解析成带格式的 run，写入 docx 段落。"""
+    """将一行文本中的 **粗体**、*斜体*、`行内代码`、![图片](url)、[链接](url)
+    解析成带格式的 run，写入 docx 段落。"""
     pos = 0
     for m in _INLINE_TOKEN_RE.finditer(text):
         if m.start() > pos:
             paragraph.add_run(text[pos:m.start()])
         token = m.group(0)
-        if token.startswith("***") and token.endswith("***"):
+        if token.startswith("!["):
+            # 图片：无法嵌入本地图片，保留 alt 文本（无 alt 则丢弃）
+            alt = re.match(r'!\[([^\]]*)\]', token).group(1)
+            if alt:
+                r = paragraph.add_run(alt)
+                r.italic = True
+        elif token.startswith("[") and token.endswith(")"):
+            # 链接：只保留文字，加下划线以示区别
+            label = re.match(r'\[([^\]]+)\]', token).group(1)
+            r = paragraph.add_run(label)
+            r.underline = True
+        elif token.startswith("***") and token.endswith("***"):
             r = paragraph.add_run(token[3:-3])
             r.bold = True
             r.italic = True
@@ -899,12 +937,48 @@ def _add_inline_runs(paragraph, text: str) -> None:
         paragraph.add_run(text[pos:])
 
 
+def _split_table_row(line: str):
+    """解析 GFM 表格行，返回单元格列表；非表格行返回 None。"""
+    s = line.strip()
+    if not s.startswith('|'):
+        return None
+    return [c.strip() for c in s.strip('|').split('|')]
+
+
+def _set_docx_default_font(doc) -> None:
+    """把文档默认正文样式设置为通用字体，并显式声明中文字体，避免中文在
+    python-docx 兜底导出时变成方块或默认西文渲染。"""
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(11)
+    rpr = style.element.get_or_add_rPr()
+    rfonts = rpr.get_or_add_rFonts()
+    rfonts.set(qn("w:eastAsia"), "微软雅黑")
+
+
+def _add_docx_hr(doc) -> None:
+    """向文档添加一条水平分隔线（段落底边框）。"""
+    p = doc.add_paragraph()
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(qn('w:val'), 'single')
+    bottom.set(qn('w:sz'), '6')
+    bottom.set(qn('w:space'), '1')
+    bottom.set(qn('w:color'), '808080')
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+
 def _markdown_to_docx_bytes_fallback(markdown_text: str) -> bytes:
     """轻量 Markdown → docx 转换（python-docx 手工解析，pandoc 不可用时的兜底方案）。
-    支持：# 标题、-/*/+ 无序列表、数字. 有序列表、```代码块```、**粗体**、*斜体*、`行内代码`。
-    其余按普通段落处理。目标是可读的 Word 文档，不追求 100% Markdown 语义还原，
-    也不支持样式模板（如需标准/模板样式，请安装 pandoc 并配置 DOCX_REFERENCE_TEMPLATE）。"""
+    支持：# 标题、| 表格 |、-/*/+ 无序列表、数字. 有序列表、> 引用块、
+    --- 分隔线、```代码块```、**粗体**、*斜体*、`行内代码`、[链接](url)。
+    其余按普通段落处理。目标是以可读且保留结构的 Word 文档输出，而不是把
+    原始 Markdown 语法原样丢进段落。如需模板/标准样式，请安装 pandoc 并配置
+    DOCX_REFERENCE_TEMPLATE。"""
     doc = Document()
+    _set_docx_default_font(doc)
     lines = (markdown_text or "").splitlines()
 
     in_code_block = False
@@ -920,45 +994,101 @@ def _markdown_to_docx_bytes_fallback(markdown_text: str) -> bytes:
         p.paragraph_format.left_indent = Pt(18)
         code_lines.clear()
 
-    for raw_line in lines:
-        line = raw_line.rstrip("\n")
+    idx = 0
+    n = len(lines)
+    while idx < n:
+        line = lines[idx].rstrip("\n")
         stripped = line.strip()
 
+        # 代码块围栏与内容
         if stripped.startswith("```"):
             if in_code_block:
                 flush_code_block()
                 in_code_block = False
             else:
                 in_code_block = True
+            idx += 1
             continue
         if in_code_block:
             code_lines.append(line)
+            idx += 1
             continue
 
+        # 空行
         if not stripped:
             doc.add_paragraph("")
+            idx += 1
             continue
 
+        # 标题
         h_match = re.match(r'^(#{1,6})\s+(.*)$', stripped)
         if h_match:
             level = len(h_match.group(1))
             doc.add_heading(h_match.group(2).strip(), level=min(level, 9))
+            idx += 1
             continue
 
-        ul_match = re.match(r'^[-*+]\s+(.*)$', stripped)
+        # 表格（连续 | 行组成一张表，跳过表头分隔行）
+        if _split_table_row(line) is not None:
+            table_lines = [line]
+            idx += 1
+            while idx < n and _split_table_row(lines[idx].rstrip("\n")) is not None:
+                table_lines.append(lines[idx].rstrip("\n"))
+                idx += 1
+            rows = []
+            for tl in table_lines:
+                cells = _split_table_row(tl) or []
+                if all(_TABLE_SEP_CELL_RE.fullmatch(c) for c in cells if c):
+                    continue  # | --- | --- | 分隔行
+                rows.append(cells)
+            if rows:
+                ncols = max(len(r) for r in rows)
+                tbl = doc.add_table(rows=len(rows), cols=ncols)
+                tbl.style = "Table Grid"
+                for ri, row in enumerate(rows):
+                    for ci in range(ncols):
+                        cell_text = row[ci] if ci < len(row) else ""
+                        _add_inline_runs(tbl.cell(ri, ci).paragraphs[0], cell_text)
+                doc.add_paragraph("")  # 表格后留一行间距
+            continue
+
+        # 引用块
+        bq_match = re.match(r'^(>+)\s?(.*)$', stripped)
+        if bq_match:
+            p = doc.add_paragraph()
+            _add_inline_runs(p, bq_match.group(2))
+            indent = 18 + 12 * (len(bq_match.group(1)) - 1)
+            p.paragraph_format.left_indent = Pt(indent)
+            p.paragraph_format.space_after = Pt(2)
+            idx += 1
+            continue
+
+        # 分隔线
+        if re.fullmatch(r'(\s*[-*_]\s*){3,}\s*', stripped):
+            _add_docx_hr(doc)
+            idx += 1
+            continue
+
+        # 无序列表
+        ul_match = re.match(r'^\s*[-*+]\s+(.*)$', line)
         if ul_match:
             p = doc.add_paragraph(style="List Bullet")
             _add_inline_runs(p, ul_match.group(1))
+            idx += 1
             continue
 
-        ol_match = re.match(r'^\d+[.)]\s+(.*)$', stripped)
+        # 有序列表
+        ol_match = re.match(r'^\s*\d+[.)]\s+(.*)$', line)
         if ol_match:
             p = doc.add_paragraph(style="List Number")
             _add_inline_runs(p, ol_match.group(1))
+            idx += 1
             continue
 
+        # 普通段落
         p = doc.add_paragraph()
         _add_inline_runs(p, stripped)
+        idx += 1
 
     if in_code_block:
         flush_code_block()  # 未闭合的代码块围栏，尽量保留已收集内容
