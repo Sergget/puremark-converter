@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet("install", "uninstall", "start", "stop", "restart", "status", "check", "schedule")] # Added 'schedule' action
     [string]$Action = "install",
