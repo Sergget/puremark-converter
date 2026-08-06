@@ -115,11 +115,14 @@ CORS(app, resources={
 })
 
 # =============================================================================
-# 任务计数器 —— 供调度层判断节点繁忙程度
+# 任务计数器与指标 —— 供调度层及看板展示
 # =============================================================================
 
 _lock = threading.Lock()
 _active_tasks = 0
+_total_success_count = 0
+_total_fail_count = 0
+_total_elapsed_ms = 0
 
 
 def task_started():
@@ -132,6 +135,16 @@ def task_finished():
     global _active_tasks
     with _lock:
         _active_tasks = max(0, _active_tasks - 1)
+
+
+def record_conversion_metrics(success: bool, elapsed_ms: float):
+    global _total_success_count, _total_fail_count, _total_elapsed_ms
+    with _lock:
+        if success:
+            _total_success_count += 1
+        else:
+            _total_fail_count += 1
+        _total_elapsed_ms += elapsed_ms
 
 
 # =============================================================================
@@ -251,6 +264,12 @@ def health():
 
     with _lock:
         active = _active_tasks
+        success_cnt = _total_success_count
+        fail_cnt = _total_fail_count
+        elapsed_tot = _total_elapsed_ms
+
+    # 计算平均耗时
+    avg_elapsed_ms = round(elapsed_tot / success_cnt, 1) if success_cnt > 0 else 0.0
 
     return jsonify({
         "status": "UP",
@@ -265,6 +284,12 @@ def health():
         "gpu_available": GPU_AVAILABLE,
         "gpu_usable": GPU_USABLE,
         "ocr_mode": OCR_MODE,
+        "metrics": {
+            "total_success_count": success_cnt,
+            "total_fail_count": fail_cnt,
+            "total_elapsed_ms": elapsed_tot,
+            "average_elapsed_ms": avg_elapsed_ms
+        }
     }), 200
 
 
@@ -408,6 +433,8 @@ def convert_document():
         try:
             result = future.result(timeout=OCR_TIMEOUT_SEC)
         except FutureTimeoutError:
+            elapsed_ms = round((time.time() - t_start) * 1000)
+            record_conversion_metrics(False, elapsed_ms)
             app.logger.error(
                 f"OCR timed out after {OCR_TIMEOUT_SEC}s for file {file.filename}. "
                 f"The file may be too large or complex."
@@ -418,6 +445,8 @@ def convert_document():
                          f"The file may be too large or complex."
             }), 504
     except Exception as e:
+        elapsed_ms = round((time.time() - t_start) * 1000)
+        record_conversion_metrics(False, elapsed_ms)
         app.logger.error(f"OCR processing failed for file {file.filename}: {str(e)}")
         app.logger.error(traceback.format_exc())
         return jsonify({
@@ -428,6 +457,7 @@ def convert_document():
         task_finished()
 
     elapsed_ms = round((time.time() - t_start) * 1000)
+    record_conversion_metrics(True, elapsed_ms)
     app.logger.info(
         f"Successfully processed file {file.filename} ({file_size_mb:.1f}MB, "
         f"pages: {result['pages']}) in {elapsed_ms}ms"

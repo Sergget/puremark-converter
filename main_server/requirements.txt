@@ -5,5 +5,5 @@ requests
 pdfplumber
 pillow
 pymupdf
-"markitdown[all]"
+markitdown[all]
 python-docx

@@ -107,6 +107,9 @@ START_TIME = time.time()
 # ---- 任务计数器（线程安全）----
 _lock = threading.Lock()
 _active_tasks = 0
+_total_success_count = 0
+_total_fail_count = 0
+_total_elapsed_ms = 0
 
 
 def task_started():
@@ -119,6 +122,16 @@ def task_finished():
     with _lock:
         global _active_tasks
         _active_tasks = max(0, _active_tasks - 1)
+
+
+def record_conversion_metrics(success: bool, elapsed_ms: float):
+    global _total_success_count, _total_fail_count, _total_elapsed_ms
+    with _lock:
+        if success:
+            _total_success_count += 1
+        else:
+            _total_fail_count += 1
+        _total_elapsed_ms += elapsed_ms
 
 
 # ---- 调度配置 ----
@@ -213,10 +226,16 @@ def health():
 
     with _lock:
         active = _active_tasks
+        success_cnt = _total_success_count
+        fail_cnt = _total_fail_count
+        elapsed_tot = _total_elapsed_ms
 
     # 探活 Win11 节点
     win11_info = _check_win11_health()
     win11_status = "UP" if win11_info is not None else "DOWN"
+
+    # 计算平均耗时
+    avg_elapsed_ms = round(elapsed_tot / success_cnt, 1) if success_cnt > 0 else 0.0
 
     return jsonify({
         "status": "UP",
@@ -231,6 +250,12 @@ def health():
         "gpu_usable": False,
         "ocr_mode": "none",
         "win11_status": win11_status,
+        "metrics": {
+            "total_success_count": success_cnt,
+            "total_fail_count": fail_cnt,
+            "total_elapsed_ms": elapsed_tot,
+            "average_elapsed_ms": avg_elapsed_ms
+        }
     }), 200
 
 
@@ -1017,12 +1042,17 @@ def _apply_output_format(result: dict, output_format: str, filename: str) -> dic
     return result
 
 
-def _respond(result: dict, status: int, output_format: str, filename: str):
-    """统一出口：成功响应按 output_format 转换后再 jsonify；失败响应原样透传。"""
+def _respond(result: dict, status: int, output_format: str, filename: str, t_start: float):
+    """统一出口：成功响应按 output_format 转换后再 jsonify；失败响应原样透传。并记录指标。"""
     if status == 200 and isinstance(result, dict) and result.get("success") and "content" in result:
         result = _apply_output_format(result, output_format, filename)
         if not result.get("success", True):
             status = 500
+    
+    elapsed_ms = round((time.perf_counter() - t_start) * 1000)
+    success = (status == 200 and isinstance(result, dict) and result.get("success", False))
+    record_conversion_metrics(success, elapsed_ms)
+    
     return jsonify(result), status
 
 
@@ -1082,6 +1112,8 @@ def convert_document():
         file_size_mb = len(file_bytes) / (1024 * 1024)
 
         if file_size_mb > MAX_FILE_SIZE_MB:
+            elapsed_ms = round((time.perf_counter() - t_start) * 1000)
+            record_conversion_metrics(False, elapsed_ms)
             return jsonify({
                 "success": False,
                 "error": f"File too large ({file_size_mb:.1f}MB). Max: {MAX_FILE_SIZE_MB}MB.",
@@ -1090,6 +1122,8 @@ def convert_document():
         _, ext = os.path.splitext(file.filename)
         ext = ext.lower()
         if not ext:
+            elapsed_ms = round((time.perf_counter() - t_start) * 1000)
+            record_conversion_metrics(False, elapsed_ms)
             return jsonify({
                 "success": False,
                 "error": "File extension missing, cannot determine format",
@@ -1100,13 +1134,15 @@ def convert_document():
             result, status = _convert_local(file_bytes, file.filename, ext, t_start)
             if crop is not None:
                 result["crop_ignored"] = "Region crop is not supported for office formats"
-            return _respond(result, status, output_format, file.filename)
+            return _respond(result, status, output_format, file.filename, t_start)
 
         elif ext in OCR_ONLY_EXTENSIONS:
             if crop is not None:
                 try:
                     file_bytes = _crop_image_bytes(file_bytes, crop)
                 except Exception as e:
+                    elapsed_ms = round((time.perf_counter() - t_start) * 1000)
+                    record_conversion_metrics(False, elapsed_ms)
                     return jsonify({
                         "success": False,
                         "error": f"Failed to crop image: {e}",
@@ -1114,7 +1150,7 @@ def convert_document():
             result, status = _convert_ocr(file_bytes, file.filename, t_start)
             if crop is not None and status == 200:
                 result["crop_applied"] = True
-            return _respond(result, status, output_format, file.filename)
+            return _respond(result, status, output_format, file.filename, t_start)
 
         elif ext == PDF_EXTENSION:
             pdf_type = _classify_pdf(file_bytes)
@@ -1132,19 +1168,21 @@ def convert_document():
                         "crop_applied": True,
                         "elapsed_ms": elapsed_ms,
                     }
-                    return _respond(result, 200, output_format, file.filename)
+                    return _respond(result, 200, output_format, file.filename, t_start)
                 result, status = _convert_local(file_bytes, file.filename, ext, t_start)
-                return _respond(result, status, output_format, file.filename)
+                return _respond(result, status, output_format, file.filename, t_start)
 
             else:  # scanned
                 if crop is not None:
                     result, status = _convert_ocr_cropped_pdf(
                         file_bytes, file.filename, crop, t_start)
-                    return _respond(result, status, output_format, file.filename)
+                    return _respond(result, status, output_format, file.filename, t_start)
                 result, status = _convert_ocr(file_bytes, file.filename, t_start)
-                return _respond(result, status, output_format, file.filename)
+                return _respond(result, status, output_format, file.filename, t_start)
 
         else:
+            elapsed_ms = round((time.perf_counter() - t_start) * 1000)
+            record_conversion_metrics(False, elapsed_ms)
             return jsonify({
                 "success": False,
                 "error": f"Unsupported format '{ext}'. See GET /supported_formats for available formats.",
@@ -1152,6 +1190,8 @@ def convert_document():
             }), 400
 
     except Exception as e:
+        elapsed_ms = round((time.perf_counter() - t_start) * 1000)
+        record_conversion_metrics(False, elapsed_ms)
         return jsonify({
             "success": False,
             "error": f"Conversion failed: {str(e)}",

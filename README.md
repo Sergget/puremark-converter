@@ -42,14 +42,34 @@ sudo bash ./deploy_ubuntu.sh
 powershell -ExecutionPolicy Bypass -File .\deploy_windows.ps1
 ```
 
-后续也可直接手动启动：
+### 本地测试服务器（一键联调启动）
+
+为了方便开发和本地测试，我们在项目根目录下提供了一键拉起本地联调环境的 Python 脚本。它将自动在本地启动 `main_server`（主调度服务，默认 8000 端口）和 `ocr_server`（Windows OCR 服务，默认 8001 端口），并做好环境变量绑定和日志合并输出，支持一键优雅关闭：
 
 ```bash
-# Ubuntu
-cd /path/to/main_server
+# 激活你的项目虚拟环境后，在根目录下执行：
+python run_local_servers.py
+```
+
+- **主调度服务地址**：`http://127.0.0.1:8000`
+- **OCR 服务地址**：`http://127.0.0.1:8001`
+- **一键退出**：在终端按 `Ctrl + C`，脚本会自动优雅地关闭、清理全部子进程，避免端口占用。
+
+此外，你还可以通过以下脚本测试本地联合服务是否能够互通（探活机制测试）：
+```bash
+python test_local_servers.py
+```
+
+### 传统手动分立启动
+
+后续也可直接手动独立拉起各个服务：
+
+```bash
+# Ubuntu (主服务)
+cd main_server
 python3 app.py
 
-# Windows
-cd E:\Code\markitdown_selfhosted\ocr_server
+# Windows (OCR 服务)
+cd ocr_server
 python ocr_server.py
 ```
